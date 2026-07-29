@@ -150,6 +150,148 @@ async function inspectBundle(connection, bundleId) {
   console.log(`Total: ${builds.length}`);
 }
 
+
+
+
+
+
+
+
+async function getCurrentSigningKey() {
+  const response = await fetch(CURRENT_KEY_URL);
+
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch signing key (${response.status})`
+    );
+  }
+
+  return response.json();
+}
+
+
+
+// step 2 
+
+
+function createDescriptor(bundle) {
+  return JSON.stringify({
+    artifact_count: bundle.artifact_count,
+    bundle_id: bundle.bundle_id,
+    total_bytes: bundle.total_bytes,
+  });
+}
+
+
+import fs from "node:fs/promises";
+import os from "node:os";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+async function signDescriptor(descriptor) {
+  const id = crypto.randomUUID();
+
+  const descriptorFile = path.join(os.tmpdir(), `${id}.bin`);
+  const signatureFile = path.join(os.tmpdir(), `${id}.pem`);
+
+  await fs.writeFile(descriptorFile, descriptor, "utf8");
+
+  await execFileAsync("openssl", [
+    "cms",
+    "-sign",
+    "-in",
+    descriptorFile,
+    "-signer",
+    "/app/keys/current/current.cert.pem",
+    "-inkey",
+    "/app/keys/current/current.key.pem",
+    "-outform",
+    "PEM",
+    "-binary",
+    "-out",
+    signatureFile,
+  ]);
+
+  const signature = await fs.readFile(signatureFile, "utf8");
+
+  await fs.rm(descriptorFile, { force: true });
+  await fs.rm(signatureFile, { force: true });
+
+  return signature;
+}
+
+
+async function publishDescriptor(descriptor, signature, requestToken) {
+  const response = await fetch(PUBLICATIONS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      descriptor,
+      signature,
+      request_token: requestToken,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      `Gateway returned ${response.status}: ${JSON.stringify(data)}`
+    );
+  }
+
+  return data;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// async function main() {
+//   console.log("Release Publisher");
+
+//   const db = new duckdb.Database(DB_PATH);
+//   const connection = db.connect();
+
+//   await initializeDatabase(connection);
+//   await loadManifest(connection);
+
+//   await printPublishableBundles(connection);
+
+//   // Temporary inspection
+//   await inspectBundle(connection, "BND-101");
+
+//   connection.close();
+// }
+
+
 async function main() {
   console.log("Release Publisher");
 
@@ -159,14 +301,35 @@ async function main() {
   await initializeDatabase(connection);
   await loadManifest(connection);
 
-  await printPublishableBundles(connection);
+  const signingKey = await getCurrentSigningKey();
 
-  // Temporary inspection
-  await inspectBundle(connection, "BND-101");
+  console.log("\nCurrent Signing Key");
+  console.table(signingKey);
+
+  const bundles = await getPublishableBundles(connection);
+
+  console.log("\nPublishable Bundles");
+  console.table(bundles);
+
+  for (const bundle of bundles) {
+    const descriptor = createDescriptor(bundle);
+
+    const signature = await signDescriptor(descriptor);
+
+    const requestToken = `token-${bundle.bundle_id}`;
+
+    const receipt = await publishDescriptor(
+      descriptor,
+      signature,
+      requestToken
+    );
+
+    console.log(`\nBundle ${bundle.bundle_id}`);
+    console.table(receipt);
+  }
 
   connection.close();
 }
-
 main().catch((err) => {
   console.error(err);
   process.exit(1);

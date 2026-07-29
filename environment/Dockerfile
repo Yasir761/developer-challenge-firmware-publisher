@@ -76,6 +76,12 @@ COPY reports/publications.expected.txt /app/reports/publications.expected.txt
 
 # The verifier launches the gateway in the background and drives it over
 # localhost; there is no CMD that starts it. A default interactive shell suffices.
+
+# Publisher implementation
+COPY publisher/ /app/publisher/
+
 CMD ["/bin/bash"]
+
+
 
 
