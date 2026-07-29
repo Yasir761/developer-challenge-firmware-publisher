@@ -45,7 +45,7 @@ async function initializeDatabase(connection) {
     `
   );
 
-  console.log("✓ Database initialized");
+  
 }
 
 async function loadManifest(connection) {
@@ -89,7 +89,7 @@ async function loadManifest(connection) {
     `
   );
 
-  console.log(`✓ Loaded ${rows[0].total_rows} manifest rows`);
+  
 }
 
 async function getPublishableBundles(connection) {
@@ -250,6 +250,44 @@ async function publishDescriptor(descriptor, signature, requestToken) {
 
 
 
+async function saveReceipt(connection, receipt, bundleId) {
+  await run(
+    connection,
+    `
+    INSERT INTO publication_receipts (
+      publication_id,
+      request_token,
+      bundle_id,
+      status
+    )
+    VALUES (
+      '${receipt.publication_id}',
+      '${receipt.request_token}',
+      '${bundleId}',
+      '${receipt.status}'
+    );
+    `
+  );
+}
+
+
+
+async function getReceipt(connection, requestToken) {
+  const rows = await all(
+    connection,
+    `
+    SELECT
+      publication_id,
+      request_token,
+      status
+    FROM publication_receipts
+    WHERE request_token='${requestToken}';
+    `
+  );
+
+  return rows.length ? rows[0] : null;
+}
+
 
 
 
@@ -293,7 +331,7 @@ async function publishDescriptor(descriptor, signature, requestToken) {
 
 
 async function main() {
-  console.log("Release Publisher");
+  
 
   const db = new duckdb.Database(DB_PATH);
   const connection = db.connect();
@@ -303,30 +341,43 @@ async function main() {
 
   const signingKey = await getCurrentSigningKey();
 
-  console.log("\nCurrent Signing Key");
-  console.table(signingKey);
+  
 
   const bundles = await getPublishableBundles(connection);
 
-  console.log("\nPublishable Bundles");
-  console.table(bundles);
+  
 
-  for (const bundle of bundles) {
+ for (const bundle of bundles) {
+  const requestToken = `token-${bundle.bundle_id}`;
+
+  let receipt = await getReceipt(connection, requestToken);
+
+  if (!receipt) {
     const descriptor = createDescriptor(bundle);
 
     const signature = await signDescriptor(descriptor);
 
-    const requestToken = `token-${bundle.bundle_id}`;
-
-    const receipt = await publishDescriptor(
+    receipt = await publishDescriptor(
       descriptor,
       signature,
       requestToken
     );
 
-    console.log(`\nBundle ${bundle.bundle_id}`);
-    console.table(receipt);
+    await saveReceipt(
+      connection,
+      receipt,
+      bundle.bundle_id
+    );
   }
+
+  console.log(
+  `BUNDLE ${bundle.bundle_id} SIGNED KEY=${signingKey.key_id}`
+);
+
+console.log(
+  `BUNDLE ${bundle.bundle_id} PUBLISHED RECEIPT=${receipt.publication_id} TOKEN=${receipt.request_token} STATUS=${receipt.status}`
+);
+}
 
   connection.close();
 }
