@@ -1,8 +1,14 @@
-#!/usr/bin/env node
+// #!/usr/bin/env node
+
 
 import duckdb from "duckdb";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import fs from "node:fs/promises";
+import os from "node:os";
+import crypto from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,6 +20,11 @@ const GATEWAY_URL = "http://127.0.0.1:7070";
 const CURRENT_KEY_URL = `${GATEWAY_URL}/v1/signing-key/current`;
 const PUBLICATIONS_URL = `${GATEWAY_URL}/v1/publications`;
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Execute a SQL statement that doesn't return rows.
+ */
 function run(connection, sql) {
   return new Promise((resolve, reject) => {
     connection.run(sql, (err) => {
@@ -23,6 +34,9 @@ function run(connection, sql) {
   });
 }
 
+/**
+ * Execute a SQL query and return all rows.
+ */
 function all(connection, sql) {
   return new Promise((resolve, reject) => {
     connection.all(sql, (err, rows) => {
@@ -32,6 +46,9 @@ function all(connection, sql) {
   });
 }
 
+/**
+ * Create the local table used to persist publication receipts.
+ */
 async function initializeDatabase(connection) {
   await run(
     connection,
@@ -44,10 +61,12 @@ async function initializeDatabase(connection) {
     );
     `
   );
-
-  
 }
 
+/**
+ * Load the manifest into DuckDB and create a view that
+ * excludes duplicate and withdrawn builds.
+ */
 async function loadManifest(connection) {
   await run(connection, `DROP VIEW IF EXISTS active_builds;`);
   await run(connection, `DROP TABLE IF EXISTS build_manifest;`);
@@ -80,18 +99,11 @@ async function loadManifest(connection) {
       );
     `
   );
-
-  const rows = await all(
-    connection,
-    `
-    SELECT COUNT(*) AS total_rows
-    FROM build_manifest;
-    `
-  );
-
-  
 }
 
+/**
+ * Compute the publishable bundles after reconciliation.
+ */
 async function getPublishableBundles(connection) {
   const bundles = await all(
     connection,
@@ -113,50 +125,9 @@ async function getPublishableBundles(connection) {
   }));
 }
 
-async function printPublishableBundles(connection) {
-  const bundles = await getPublishableBundles(connection);
-
-  console.log("\nPublishable Bundles");
-  console.table(bundles);
-}
-
-async function getBundleBuilds(connection, bundleId) {
-  const rows = await all(
-    connection,
-    `
-    SELECT
-      entry_id,
-      component_id,
-      version,
-      size_bytes,
-      recorded_at
-    FROM active_builds
-    WHERE bundle_id='${bundleId}'
-    ORDER BY component_id, version, entry_id;
-    `
-  );
-
-  return rows.map((row) => ({
-    ...row,
-    size_bytes: Number(row.size_bytes),
-  }));
-}
-
-async function inspectBundle(connection, bundleId) {
-  const builds = await getBundleBuilds(connection, bundleId);
-
-  console.log(`\n${bundleId} Builds`);
-  console.table(builds);
-  console.log(`Total: ${builds.length}`);
-}
-
-
-
-
-
-
-
-
+/**
+ * Retrieve the currently trusted signing key metadata.
+ */
 async function getCurrentSigningKey() {
   const response = await fetch(CURRENT_KEY_URL);
 
@@ -169,11 +140,9 @@ async function getCurrentSigningKey() {
   return response.json();
 }
 
-
-
-// step 2 
-
-
+/**
+ * Build the canonical JSON descriptor that will be signed.
+ */
 function createDescriptor(bundle) {
   return JSON.stringify({
     artifact_count: bundle.artifact_count,
@@ -182,15 +151,9 @@ function createDescriptor(bundle) {
   });
 }
 
-
-import fs from "node:fs/promises";
-import os from "node:os";
-import crypto from "node:crypto";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
-
+/**
+ * Sign a descriptor using OpenSSL CMS and the current keypair.
+ */
 async function signDescriptor(descriptor) {
   const id = crypto.randomUUID();
 
@@ -223,7 +186,9 @@ async function signDescriptor(descriptor) {
   return signature;
 }
 
-
+/**
+ * Submit the signed descriptor to the distribution gateway.
+ */
 async function publishDescriptor(descriptor, signature, requestToken) {
   const response = await fetch(PUBLICATIONS_URL, {
     method: "POST",
@@ -248,8 +213,9 @@ async function publishDescriptor(descriptor, signature, requestToken) {
   return data;
 }
 
-
-
+/**
+ * Persist a successful publication receipt.
+ */
 async function saveReceipt(connection, receipt, bundleId) {
   await run(
     connection,
@@ -270,8 +236,9 @@ async function saveReceipt(connection, receipt, bundleId) {
   );
 }
 
-
-
+/**
+ * Retrieve an existing receipt to avoid duplicate publications.
+ */
 async function getReceipt(connection, requestToken) {
   const rows = await all(
     connection,
@@ -288,51 +255,10 @@ async function getReceipt(connection, requestToken) {
   return rows.length ? rows[0] : null;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// async function main() {
-//   console.log("Release Publisher");
-
-//   const db = new duckdb.Database(DB_PATH);
-//   const connection = db.connect();
-
-//   await initializeDatabase(connection);
-//   await loadManifest(connection);
-
-//   await printPublishableBundles(connection);
-
-//   // Temporary inspection
-//   await inspectBundle(connection, "BND-101");
-
-//   connection.close();
-// }
-
-
+/**
+ * Main publishing workflow.
+ */
 async function main() {
-  
-
   const db = new duckdb.Database(DB_PATH);
   const connection = db.connect();
 
@@ -340,47 +266,42 @@ async function main() {
   await loadManifest(connection);
 
   const signingKey = await getCurrentSigningKey();
-
-  
-
   const bundles = await getPublishableBundles(connection);
 
-  
+  for (const bundle of bundles) {
+    const requestToken = `token-${bundle.bundle_id}`;
 
- for (const bundle of bundles) {
-  const requestToken = `token-${bundle.bundle_id}`;
+    let receipt = await getReceipt(connection, requestToken);
 
-  let receipt = await getReceipt(connection, requestToken);
+    if (!receipt) {
+      const descriptor = createDescriptor(bundle);
+      const signature = await signDescriptor(descriptor);
 
-  if (!receipt) {
-    const descriptor = createDescriptor(bundle);
+      receipt = await publishDescriptor(
+        descriptor,
+        signature,
+        requestToken
+      );
 
-    const signature = await signDescriptor(descriptor);
+      await saveReceipt(
+        connection,
+        receipt,
+        bundle.bundle_id
+      );
+    }
 
-    receipt = await publishDescriptor(
-      descriptor,
-      signature,
-      requestToken
+    console.log(
+      `BUNDLE ${bundle.bundle_id} SIGNED KEY=${signingKey.key_id}`
     );
 
-    await saveReceipt(
-      connection,
-      receipt,
-      bundle.bundle_id
+    console.log(
+      `BUNDLE ${bundle.bundle_id} PUBLISHED RECEIPT=${receipt.publication_id} TOKEN=${receipt.request_token} STATUS=${receipt.status}`
     );
   }
 
-  console.log(
-  `BUNDLE ${bundle.bundle_id} SIGNED KEY=${signingKey.key_id}`
-);
-
-console.log(
-  `BUNDLE ${bundle.bundle_id} PUBLISHED RECEIPT=${receipt.publication_id} TOKEN=${receipt.request_token} STATUS=${receipt.status}`
-);
-}
-
   connection.close();
 }
+
 main().catch((err) => {
   console.error(err);
   process.exit(1);
