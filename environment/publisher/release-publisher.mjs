@@ -22,13 +22,14 @@ function run(connection, sql) {
 function all(connection, sql) {
   return new Promise((resolve, reject) => {
     connection.all(sql, (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows);
-      }
+      if (err) reject(err);
+      else resolve(rows);
     });
   });
+}
+
+function printRows(rows) {
+  console.table(rows);
 }
 
 async function initializeDatabase(connection) {
@@ -43,6 +44,8 @@ async function initializeDatabase(connection) {
     );
     `
   );
+
+  console.log("✓ Database initialized");
 }
 
 async function loadManifest(connection) {
@@ -57,17 +60,27 @@ async function loadManifest(connection) {
     `
   );
 
-const rows = await all(
-  connection,
-  `
-  SELECT COUNT(*) AS total_rows
-  FROM build_manifest;
-  `
-);
+  const rows = await all(
+    connection,
+    `
+    SELECT *
+    FROM build_manifest
+    LIMIT 5;
+    `
+  );
 
+  console.log("\nFirst five manifest rows:");
+  printRows(rows);
 
+  const count = await all(
+    connection,
+    `
+    SELECT COUNT(*) AS total_rows
+    FROM build_manifest;
+    `
+  );
 
- console.log(`✓ Loaded ${rows[0].total_rows} manifest rows`);
+  console.log(`✓ Loaded ${count[0].total_rows} manifest rows`);
 }
 
 async function main() {
@@ -77,9 +90,6 @@ async function main() {
   const connection = db.connect();
 
   await initializeDatabase(connection);
-
-  console.log("✓ Database initialized");
-
   await loadManifest(connection);
 
   connection.close();
