@@ -63,9 +63,11 @@ async function loadManifest(connection) {
   const rows = await all(
     connection,
     `
-    SELECT *
+    SELECT COUNT(*) AS total
+FROM (
+    SELECT DISTINCT *
     FROM build_manifest
-    LIMIT 5;
+);
     `
   );
 
